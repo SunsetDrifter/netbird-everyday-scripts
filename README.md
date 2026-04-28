@@ -1,0 +1,1 @@
+# netbird-everyday-scripts
