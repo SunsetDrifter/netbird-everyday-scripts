@@ -1,0 +1,71 @@
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  analyze:
+    # windows-latest so the analyzer sees the same cmdlet surface the script
+    # actually runs against, and so the 5.1 compatibility profile is meaningful.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+
+      - name: Parse
+        shell: pwsh
+        run: |
+          $errs = $null; $toks = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./Install-NetBird.ps1), [ref]$toks, [ref]$errs) | Out-Null
+          if ($errs) {
+            $errs | ForEach-Object {
+              Write-Error "line $($_.Extent.StartLineNumber): $($_.Message)" -ErrorAction Continue
+            }
+            exit 1
+          }
+          Write-Host "parse: OK"
+
+      - name: Analyze
+        shell: pwsh
+        run: |
+          # PSReviewUnusedParameter: script parameters are consumed inside
+          # functions via scope inheritance, which the rule does not follow.
+          # PSUseShouldProcessForStateChangingFunctions: these are internal
+          # helpers of a deployment script, not exported cmdlets.
+          $r = Invoke-ScriptAnalyzer -Path ./Install-NetBird.ps1 -Severity Error,Warning `
+                 -ExcludeRule PSReviewUnusedParameter,
+                              PSUseShouldProcessForStateChangingFunctions,
+                              PSAvoidOverwritingBuiltInCmdlets
+          if ($r) { $r | Format-Table -AutoSize RuleName,Line,Message -Wrap; exit 1 }
+          Write-Host "analyzer: clean"
+
+      - name: PowerShell 5.1 compatibility
+        shell: pwsh
+        run: |
+          $settings = @{
+            Rules = @{
+              PSUseCompatibleSyntax = @{
+                Enable         = $true
+                TargetVersions = @('5.1')
+              }
+            }
+          }
+          $r = Invoke-ScriptAnalyzer -Path ./Install-NetBird.ps1 `
+                 -IncludeRule PSUseCompatibleSyntax -Settings $settings
+          if ($r) { $r | Format-Table -AutoSize RuleName,Line,Message -Wrap; exit 1 }
+          Write-Host "5.1 syntax: OK"
+
+      - name: Check phase runs
+        shell: powershell
+        run: |
+          # Windows PowerShell 5.1 deliberately, not pwsh: this is the host an
+          # RMM launches. The check phase is read-only and safe on a runner with
+          # no NetBird installed, so it doubles as a smoke test of the shared
+          # helpers and the session-0 branch.
+          ./Install-NetBird.ps1 -Phase Check -LogPath "$env:TEMP\check.log"
