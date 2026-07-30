@@ -65,7 +65,7 @@ reinstalls when you actually mean to.
 ### Phase 2: provision, as the signed-in user, not elevated
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden `
   -File .\Install-NetBird.ps1 -Phase Provision
 ```
 
@@ -122,6 +122,32 @@ with nothing logged.
 | `-ConnectTimeoutSeconds` | Provision | Default 300, generous enough for a human to complete an interactive sign-in. `netbird up` against an unreachable server blocks indefinitely rather than failing, so this is bounded. |
 | `-Quiet` | | File-only logging, no console output. |
 | `-LogPath` | | Override the log location. |
+
+## On staying silent
+
+The install phase is silent in every sense. `msiexec` runs `/qn /norestart` with
+no UI, it is started `-WindowStyle Hidden`, and the phase runs as SYSTEM in
+session 0, where there is no user desktop to draw on. Nothing can appear no
+matter how it is launched.
+
+The provision phase is different, and the difference is not optional: it runs in
+the user's own session, because that is the only place the tray can start. So
+whether the user sees anything depends on how your RMM launches it, not on what
+the script does. Measured on Windows Server 2022, launching through a scheduled
+task with an `Interactive` principal:
+
+| Launch | Visible console on the user's desktop |
+|---|---|
+| `powershell.exe -File ...` | yes |
+| `powershell.exe -WindowStyle Hidden -File ...` | no |
+
+Pass `-WindowStyle Hidden` on the provision step. `-Quiet` is a different knob:
+it suppresses the script's own console output, and stops nothing from being
+drawn.
+
+The tray launch itself never shows a console. `netbird-ui.exe` is a GUI
+application started directly by the scheduled task, and `netbird up` runs with
+`-NoNewWindow`, so it borrows the caller's console rather than opening one.
 
 ## Notes worth knowing
 

@@ -44,11 +44,14 @@
         -Phase Install -ManagementUrl https://api.example.com -Version 0.75.1
 
 .EXAMPLE
-    # RMM step 2, as the signed-in user, not elevated
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-NetBird.ps1 -Phase Provision
+    # RMM step 2, as the signed-in user, not elevated.
+    # -WindowStyle Hidden matters here and not in step 1: this phase runs in the
+    # user's own session, so without it they watch a PowerShell console appear.
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File .\Install-NetBird.ps1 -Phase Provision
 
 .EXAMPLE
-    # Anytime, to see why there is no tray icon
+    # Anytime, to see why there is no tray icon. No -WindowStyle Hidden: this
+    # one is run by a human who wants to read the output.
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-NetBird.ps1 -Phase Check
 #>
 
