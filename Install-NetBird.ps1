@@ -375,8 +375,24 @@ function Get-Installer {
 }
 
 function Invoke-InstallPhase {
+    # The NetBird MSI does not require you to pre-elevate: run interactively, it
+    # requests elevation itself and Windows shows a UAC prompt. That is why you
+    # may be told it "does not need admin", and for a person double-clicking it,
+    # that is true.
+    #
+    # A silent install is a different matter, and this phase is always silent.
+    # With /qn there is no UI, so Windows cannot show that prompt and refuses:
+    # msiexec returns 1625 and logs "MSI_LUA: Installation UI level is silent, no
+    # credential elevation is possible" (measured, Windows Server 2022, v0.76.0,
+    # as a standard user). The install is per-machine regardless: Program Files,
+    # a Windows service, and a system PATH entry.
+    #
+    # So this refuses up front rather than letting msiexec fail with a code
+    # nobody recognises.
     if (-not (Test-Elevated)) {
-        Stop-WithError "The install phase needs SYSTEM or an elevated administrator."
+        Write-Log "This phase installs silently, and a silent install cannot raise a UAC prompt." 'ERROR'
+        Write-Log "Run it as SYSTEM or from an already-elevated administrator process. Running the" 'ERROR'
+        Stop-WithError "MSI interactively instead would prompt for elevation on its own."
     }
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12

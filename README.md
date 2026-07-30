@@ -136,6 +136,42 @@ with nothing logged.
 | `-Quiet` | | File-only logging, no console output. |
 | `-LogPath` | | Override the log location. |
 
+## Administrator rights
+
+Only the install phase needs them, and only because it is silent.
+
+| Phase | Needs admin |
+|---|---|
+| `Install` | yes, SYSTEM or an already-elevated process |
+| `Provision` | **no**, and it refuses to run elevated |
+| `Check` | no |
+
+You may be told the NetBird installer does not need administrator rights. Run
+interactively that is true: the MSI requests elevation itself and Windows shows
+a UAC prompt, so nobody has to right-click and choose "Run as administrator".
+
+A silent install cannot do that. With `/qn` there is no UI, so Windows will not
+show the prompt and refuses outright. Measured on Windows Server 2022 with
+v0.76.0, as a genuine standard user (`Users` only, not `Administrators`):
+
+```
+exit=1625
+MSI (s) MSI_LUA: Installation UI level is silent, no credential elevation is possible
+```
+
+The same MSI run interactively by the same user produced a `consent.exe` UAC
+credential prompt, which is the elevation request the dev is describing. Both
+things are true at once; only one of them applies to an RMM. The install is
+per-machine either way: `Program Files`, a Windows service, and a system `PATH`
+entry.
+
+The provision phase is the opposite case and it matters more, because it runs on
+every user device. It needs no administrator rights at all: registering a
+scheduled task with an `Interactive` principal is something a standard user may
+do for themselves, `netbird up` talks to the already-running daemon over its
+local socket, and the launch-at-login value lives in `HKCU`. Verified end to end
+as an account in `Users` and nothing else.
+
 ## On staying silent
 
 The install phase is silent in every sense. `msiexec` runs `/qn /norestart` with
