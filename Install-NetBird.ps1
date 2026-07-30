@@ -98,6 +98,13 @@ param(
     # management server is unreachable.
     [int]$ConnectTimeoutSeconds = 300,
 
+    # Outbound proxy for the installer download, for example
+    # http://proxy.example.com:8080. Only the install phase makes an outbound
+    # HTTP request. Omitted, the download uses whatever system proxy is
+    # configured, which under SYSTEM is often not what the signed-in user has,
+    # so a proxied fleet usually needs this set explicitly.
+    [string]$Proxy,
+
     # File-only logging, no console output. The original deployment default.
     [switch]$Quiet,
 
@@ -106,12 +113,22 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Set by the provision phase to shape its exit code, see the contract at the end
+# of Invoke-ProvisionPhase.
+$script:ProvisionFailure = $false
+$script:ConnectFailure   = $false
+
 $PolicyKey      = 'HKLM:\Software\Policies\NetBird'
 $ServiceName    = 'NetBird'
 $RunKeyPath     = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $RunValueName   = 'netbird'
 $ExpectedSigner = 'NetBird GmbH'
-$TrayTaskName   = 'NetBird-Tray-FirstLaunch'
+# Scheduled task names live in one machine-wide namespace, so a fixed name
+# collides on a multi-session host (RDS/VDI) where two users provision at once:
+# the second Register-ScheduledTask -Force overwrites the first, and whichever
+# finally-block runs first unregisters it out from under the other. Scope the
+# name to the user and session.
+$TrayTaskName   = "NetBird-Tray-FirstLaunch-$($env:USERNAME)-$((Get-Process -Id $PID).SessionId)"
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -128,9 +145,24 @@ if (-not $LogPath) {
     }
 }
 
+# A bare or relative -LogPath used to crash here, before any logging existed to
+# report it: Split-Path -Parent returns '' for 'deploy.log', and New-Item then
+# fails with "Cannot bind argument to parameter 'Path' because it is an empty
+# string". That is outside the try/catch below, so the operator got a raw
+# binding stack trace on an entirely reasonable input.
+if (-not [IO.Path]::IsPathRooted($LogPath)) {
+    $LogPath = Join-Path (Get-Location).ProviderPath $LogPath
+}
 $logDir = Split-Path $LogPath -Parent
-if (-not (Test-Path -LiteralPath $logDir)) {
-    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+try {
+    if (-not (Test-Path -LiteralPath $logDir)) {
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    }
+}
+catch {
+    # No Write-Log yet, by definition. Write-Error is the only channel left.
+    Write-Error "Cannot create the log directory '$logDir': $($_.Exception.Message)"
+    exit 1
 }
 
 function Write-Log {
@@ -348,11 +380,23 @@ function Get-Installer {
         Write-Log "Downloading the current release ($arch)."
     }
 
+    $webArgs = @{ Uri = $url; OutFile = $Destination; UseBasicParsing = $true }
+    if ($Proxy) {
+        $webArgs.Proxy = $Proxy
+        # Corporate proxies are usually authenticated, and under SYSTEM the only
+        # credentials available are the machine account's.
+        $webArgs.ProxyUseDefaultCredentials = $true
+        Write-Log "Using proxy $Proxy"
+    }
     try {
-        Invoke-WebRequest -Uri $url -OutFile $Destination -UseBasicParsing
+        Invoke-WebRequest @webArgs
     }
     catch {
-        Stop-WithError "Download failed from ${url}: $($_.Exception.Message)"
+        Write-Log "Download failed from ${url}: $($_.Exception.Message)" 'ERROR'
+        if (-not $Proxy) {
+            Stop-WithError "If this network requires a proxy, pass -Proxy http://host:port."
+        }
+        Stop-WithError "Check that $Proxy is reachable and permits this host."
     }
 
     if (-not (Test-Path -LiteralPath $Destination) -or (Get-Item $Destination).Length -lt 1MB) {
@@ -365,9 +409,16 @@ function Get-Installer {
         Remove-Item $Destination -Force -ErrorAction SilentlyContinue
         Stop-WithError "MSI signature is not valid (Status: $($sig.Status))."
     }
-    # A valid signature only means somebody signed it. Check who.
+    # A valid signature only means somebody signed it. Check who, and check it
+    # as a whole RDN rather than a substring: a plain "contains" test would also
+    # accept CN=Not-The-Real NetBird GmbH Ltd. A public CA issuing that org
+    # string is the real barrier, but the check should not be the weak part.
     $subject = [string]$sig.SignerCertificate.Subject
-    if ($subject -notmatch [regex]::Escape($ExpectedSigner)) {
+    $rdns = @($subject -split ',\s*(?=[A-Za-z0-9.]+=)')
+    $matched = @($rdns | Where-Object {
+        $_ -match '^(CN|O)=(.+)$' -and $Matches[2].Trim(' "') -eq $ExpectedSigner
+    })
+    if (-not $matched) {
         Remove-Item $Destination -Force -ErrorAction SilentlyContinue
         Stop-WithError "MSI is signed by an unexpected publisher: $subject"
     }
@@ -406,7 +457,20 @@ function Invoke-InstallPhase {
     $existing = Get-NetBirdInstall | Select-Object -First 1
     if ($existing -and -not $Force) {
         $wanted = $Version -replace '^v', ''
-        if (-not $wanted -or $existing.DisplayVersion -like "$wanted*") {
+        # Compare as versions, not with a trailing wildcard: '0.75.11' -like
+        # '0.75.1*' is true, so asking for 0.75.1 would treat 0.75.11 as already
+        # satisfied and skip the change. Fall back to string equality only if
+        # either side will not parse.
+        $satisfied = $false
+        if ($wanted) {
+            $wv = $null; $iv = $null
+            if ([Version]::TryParse($wanted, [ref]$wv) -and
+                [Version]::TryParse($existing.DisplayVersion, [ref]$iv)) {
+                $satisfied = ($wv -eq $iv)
+            }
+            else { $satisfied = ($existing.DisplayVersion -eq $wanted) }
+        }
+        if (-not $wanted -or $satisfied) {
             # Deliberately does not upgrade on every re-run. An RMM re-runs this
             # step routinely, and silently churning a fleet's client version on
             # each pass is not something a deployment script should decide.
@@ -414,7 +478,17 @@ function Invoke-InstallPhase {
             if ($ManagementUrl -and -not $SkipPolicy) { Set-ManagementPolicy -Url $ManagementUrl }
             return 0
         }
-        Write-Log "Installed $($existing.DisplayVersion), requested $wanted. Upgrading in place."
+        # Downgrades are rejected by the MSI itself (DowngradeErrorMessage), so
+        # say which direction this is rather than promising an upgrade.
+        $iv = $null; $wv = $null
+        if ([Version]::TryParse($existing.DisplayVersion, [ref]$iv) -and
+            [Version]::TryParse($wanted, [ref]$wv) -and $wv -lt $iv) {
+            Write-Log "Installed $($existing.DisplayVersion) is newer than the requested $wanted." 'WARN'
+            Write-Log "The MSI refuses downgrades. Uninstall first if you really mean to go back." 'WARN'
+        }
+        else {
+            Write-Log "Installed $($existing.DisplayVersion), requested $wanted. Upgrading in place."
+        }
     }
 
     # Policy before msiexec, deliberately. The daemon starts during the install
@@ -449,11 +523,19 @@ function Invoke-InstallPhase {
 
     Remove-Item $msi -Force -ErrorAction SilentlyContinue
 
-    # 3010 is ERROR_SUCCESS_REBOOT_REQUIRED. The install succeeded.
-    if ($proc.ExitCode -notin @(0, 3010)) {
+    # 3010 is ERROR_SUCCESS_REBOOT_REQUIRED and 1641 is
+    # ERROR_SUCCESS_REBOOT_INITIATED. Both mean the install succeeded.
+    if ($proc.ExitCode -eq 1618) {
+        Stop-WithError "Another installation is already in progress. Retry this step later." $proc.ExitCode
+    }
+    if ($proc.ExitCode -eq 1625) {
+        Stop-WithError "msiexec refused: a silent install cannot elevate. Run this phase elevated." $proc.ExitCode
+    }
+    if ($proc.ExitCode -notin @(0, 3010, 1641)) {
         Stop-WithError "Install failed with exit code $($proc.ExitCode). See $msiLog" $proc.ExitCode
     }
     if ($proc.ExitCode -eq 3010) { Write-Log "Install succeeded; a reboot is pending." 'WARN' }
+    if ($proc.ExitCode -eq 1641) { Write-Log "Install succeeded; a reboot has been initiated." 'WARN' }
 
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if (-not $svc) { Stop-WithError "Install reported success but the $ServiceName service is absent." }
@@ -522,9 +604,13 @@ function Connect-Peer {
     if ($r.TimedOut) {
         Write-Log "'netbird up' did not finish within $ConnectTimeoutSeconds seconds and was stopped." 'WARN'
         Write-Log "With interactive sign-in this usually means nobody completed it. Check the management URL is reachable." 'WARN'
+        # Deliberately not a failure when signing in interactively: waiting for a
+        # person is the expected state, and the tray is already up for them.
+        if ($SetupKeyFile) { $script:ConnectFailure = $true }
     }
     elseif ($r.ExitCode -ne 0) {
         Write-Log "'netbird up' reported a non-zero exit ($($r.ExitCode)). The status below is what counts." 'WARN'
+        if ($SetupKeyFile) { $script:ConnectFailure = $true }
     }
 
     # Report the outcome rather than assert it. A device that is not yet
@@ -583,13 +669,31 @@ function Invoke-ProvisionPhase {
     }
     Write-Log "Interactive session $session as $([Security.Principal.WindowsIdentity]::GetCurrent().Name)."
 
+    # Why this refuses to run elevated.
+    #
+    # NOT because the tray would then miss launch at login. That was the earlier
+    # rationale and it is wrong for this script: the tray is always started
+    # through a scheduled task at RunLevel Limited, and the task's RunLevel
+    # decides the child's token regardless of how elevated the registering
+    # process was. Measured: a local administrator launched that way reported
+    # elevated=False and the autostart default fired. So this script's own tray
+    # launch is safe from an elevated parent.
+    #
+    # The real reason is that an elevated provision phase is evidence the RMM is
+    # not running this step as the person at the keyboard. Everything downstream
+    # is per-user: the launch-at-login value lives in that user's HKCU, the log
+    # goes to their LOCALAPPDATA, and the tray is started as
+    # WindowsIdentity::GetCurrent(). Run under an admin account instead of the
+    # signed-in user, all of it lands on the wrong profile and the signed-in
+    # user still has no tray, which is the failure this script exists to stop.
     if (Test-Elevated) {
         if (-not $AllowElevated) {
-            Write-Log "An elevated first tray launch silently skips launch at login for this user, permanently." 'ERROR'
-            Write-Log "Run this phase unelevated, or pass -AllowElevated to proceed anyway, in which case the" 'ERROR'
-            Stop-WithError "script writes the launch-at-login value itself to compensate."
+            Write-Log "This phase is elevated, which usually means it is not running as the signed-in user." 'ERROR'
+            Write-Log "Launch at login, the log, and the tray all follow whichever account runs this, so an" 'ERROR'
+            Write-Log "admin account here leaves the actual user with no tray. Point the RMM's user-context" 'ERROR'
+            Stop-WithError "step at the signed-in user, or pass -AllowElevated if this really is that user."
         }
-        Write-Log "-AllowElevated set. The Run value will be written directly, since the tray will not." 'WARN'
+        Write-Log "-AllowElevated set. Confirm this is the signed-in user's own account, not an admin account." 'WARN'
     }
 
     $installDir = Get-InstallDir
@@ -624,7 +728,8 @@ function Invoke-ProvisionPhase {
         Write-Log "Tray running: pid $($tray[0].Id) in session $($tray[0].SessionId)."
     }
     else {
-        Write-Log "No netbird-ui process in session $session after launch. See -Phase Check." 'WARN'
+        Write-Log "No netbird-ui process in session $session after launch. See -Phase Check." 'ERROR'
+        $script:ProvisionFailure = $true
     }
 
     Connect-Peer -InstallDir $installDir
@@ -641,6 +746,23 @@ function Invoke-ProvisionPhase {
     }
     else {
         Write-Log "Launch at login is not set for this user. Check the DisableAutostart policy value." 'WARN'
+    }
+
+    # An RMM decides success from the exit code, not by reading the log. Warning
+    # about a missing tray and then returning 0 would report success on exactly
+    # the failure this script exists to catch.
+    #
+    # 0  tray is running in the user's session (registration may still be
+    #    outstanding: with interactive SSO that is normal and not a failure)
+    # 2  the tray did not start
+    # 3  registration failed outright, though the tray is up
+    if ($script:ProvisionFailure) {
+        Write-Log "Provision FAILED: the tray is not running in session $session." 'ERROR'
+        return 2
+    }
+    if ($script:ConnectFailure) {
+        Write-Log "Tray is up, but registration did not complete. The user can sign in from the tray." 'WARN'
+        return 3
     }
     return 0
 }

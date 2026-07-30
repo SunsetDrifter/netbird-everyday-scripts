@@ -133,8 +133,27 @@ with nothing logged.
 | `-Force` | Install | Reinstall even when the requested version is already present. |
 | `-AllowElevated` | Provision | Proceed from an elevated process, writing the launch-at-login value directly since the tray will not. |
 | `-ConnectTimeoutSeconds` | Provision | Default 300, generous enough for a human to complete an interactive sign-in. `netbird up` against an unreachable server blocks indefinitely rather than failing, so this is bounded. |
+| `-Proxy` | Install | Outbound proxy for the download, e.g. `http://proxy.example.com:8080`. Omitted uses the system proxy, which under SYSTEM is often not the one the user has. |
 | `-Quiet` | | File-only logging, no console output. |
 | `-LogPath` | | Override the log location. |
+
+## Exit codes
+
+An RMM decides success from the exit code, not by reading a log, so the phases
+have a contract. In particular the provision phase does not return 0 when the
+tray failed to start, which is the one failure the whole script exists to catch.
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 1 | error, with the reason logged. Includes refusing to run in the wrong context |
+| 2 | provision only: the tray did not start |
+| 3 | provision only: the tray is up but registration failed |
+| other | install only: passed through from `msiexec`, with `3010` and `1641` treated as success |
+
+Code 3 is not raised when registering interactively and nobody has signed in
+yet. Waiting on a person is the expected state, and the tray is already up for
+them to sign in with.
 
 ## Administrator rights
 
