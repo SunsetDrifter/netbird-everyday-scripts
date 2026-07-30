@@ -13,8 +13,7 @@ Users can reach their resources, `netbird status` says Connected, and nothing in
 the system tray. Opening NetBird from the Start Menu works immediately, which
 makes the whole thing look like a cosmetic glitch.
 
-It is not. There are two separate mechanisms behind it, and only one of them is
-about your script:
+Two separate mechanisms cause it, and only one is about your script.
 
 **The tray UI cannot start outside an interactive user session.** The daemon is
 a Windows service and installs and runs fine from SYSTEM. `netbird-ui.exe` is a
@@ -32,8 +31,8 @@ once. Get that first launch right and the tray comes back at every subsequent
 sign-in with no scripting at all. Get it wrong and there is no second chance for
 that user.
 
-So the deployment problem is a first-run problem, and it belongs in a phase that
-runs as the user rather than as SYSTEM.
+So this is a first-run problem, and it belongs in a phase that runs as the user
+rather than as SYSTEM.
 
 ## Usage
 
@@ -165,44 +164,25 @@ Only the install phase needs them, and only because it is silent.
 | `Provision` | **no**, and it refuses to run elevated |
 | `Check` | no |
 
-You may be told the NetBird installer does not need administrator rights. Run
-interactively that is true: the MSI requests elevation itself and Windows shows
-a UAC prompt, so nobody has to right-click and choose "Run as administrator".
+The NetBird MSI does not require you to pre-elevate. Double-clicked, it requests
+elevation itself and Windows shows a UAC prompt. A silent install cannot raise
+that prompt, so `/qn` from a standard user fails with `1625` instead. The install
+is per-machine either way: `Program Files`, a Windows service, a system `PATH`
+entry. Run the install step as SYSTEM and this never comes up.
 
-A silent install cannot do that. With `/qn` there is no UI, so Windows will not
-show the prompt and refuses outright. Measured on Windows Server 2022 with
-v0.76.0, as a genuine standard user (`Users` only, not `Administrators`):
-
-```
-exit=1625
-MSI (s) MSI_LUA: Installation UI level is silent, no credential elevation is possible
-```
-
-The same MSI run interactively by the same user produced a `consent.exe` UAC
-credential prompt, which is the elevation request the dev is describing. Both
-things are true at once; only one of them applies to an RMM. The install is
-per-machine either way: `Program Files`, a Windows service, and a system `PATH`
-entry.
-
-The provision phase is the opposite case and it matters more, because it runs on
-every user device. It needs no administrator rights at all: registering a
-scheduled task with an `Interactive` principal is something a standard user may
-do for themselves, `netbird up` talks to the already-running daemon over its
-local socket, and the launch-at-login value lives in `HKCU`. Verified end to end
-as an account in `Users` and nothing else.
+The provision phase matters more here, because it runs on every user device, and
+it needs no administrator rights at all. Registering a scheduled task with an
+`Interactive` principal is something a standard user may do for themselves,
+`netbird up` talks to the already-running daemon over its local socket, and
+launch at login lives in `HKCU`.
 
 ## On staying silent
 
-The install phase is silent in every sense. `msiexec` runs `/qn /norestart` with
-no UI, it is started `-WindowStyle Hidden`, and the phase runs as SYSTEM in
-session 0, where there is no user desktop to draw on. Nothing can appear no
-matter how it is launched.
+The install phase is silent whatever you do: `/qn /norestart`, msiexec started
+hidden, and SYSTEM in session 0 has no user desktop to draw on.
 
-The provision phase is different, and the difference is not optional: it runs in
-the user's own session, because that is the only place the tray can start. So
-whether the user sees anything depends on how your RMM launches it, not on what
-the script does. Measured on Windows Server 2022, launching through a scheduled
-task with an `Interactive` principal:
+The provision phase runs in the user's own session, because that is the only
+place the tray can start, so what they see depends on how you launch it:
 
 | Launch | Visible console on the user's desktop |
 |---|---|
@@ -210,12 +190,8 @@ task with an `Interactive` principal:
 | `powershell.exe -WindowStyle Hidden -File ...` | no |
 
 Pass `-WindowStyle Hidden` on the provision step. `-Quiet` is a different knob:
-it suppresses the script's own console output, and stops nothing from being
-drawn.
-
-The tray launch itself never shows a console. `netbird-ui.exe` is a GUI
-application started directly by the scheduled task, and `netbird up` runs with
-`-NoNewWindow`, so it borrows the caller's console rather than opening one.
+it silences the script's own output and stops nothing from being drawn. The tray
+launch never shows a console of its own.
 
 ## Notes worth knowing
 
@@ -263,12 +239,9 @@ to run a 32-bit PowerShell host on a 64-bit machine.
 
 ## Behavior claims
 
-Every claim above was measured on Windows Server 2022 with client v0.75.1,
-against v0.74.7 as a version control, rather than read off the source. The
-details are unremarkable and the conclusions are not, which is why they are
-stated as flatly as they are.
+Every claim above was measured on Windows Server 2022, against v0.74.7 as a
+version control, rather than read off the source.
 
-The claims still hold on v0.76.0: `client/ui/autostart_default.go`,
-`client/netbird.wxs` and `client/installer.nsis` are byte-identical between
-v0.75.1 and v0.76.0, so nothing the autostart and installer behavior rests on
-changed. The script itself was run end to end on v0.76.0.
+They hold on v0.76.0 too: `client/ui/autostart_default.go`, `client/netbird.wxs`
+and `client/installer.nsis` are byte-identical to v0.75.1, and the script was run
+end to end on both.
