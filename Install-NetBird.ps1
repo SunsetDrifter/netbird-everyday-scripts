@@ -321,20 +321,10 @@ function Wait-FileUnlocked {
 
 function Set-ManagementPolicy {
     <#
-      Writes the management server as managed policy rather than passing
-      --management-url on every user's command line.
-
-      Three reasons this is the better place for it:
-        - It is machine-wide and set before the daemon's first config load, so
-          the very first connection already points at the right server.
-        - A ManagementURL policy value SILENTLY overrides a --management-url
-          passed on the command line. Leaving both in place means the flag is
-          decoration and the registry is in charge; better to be explicit.
-        - The daemon re-reads policy once a minute, so changing servers later
-          does not need a reinstall.
-
-      Value names are matched case-insensitively; the casing here matches the
-      upstream ADMX.
+      Managed policy rather than --management-url on every command line: it is
+      set before the daemon's first config load, and it silently overrides the
+      flag anyway. README, "Notes worth knowing". Value names are matched
+      case-insensitively; this casing matches the upstream ADMX.
     #>
     param([Parameter(Mandatory)] [string]$Url)
     if (-not (Test-Path -LiteralPath $PolicyKey)) {
@@ -426,20 +416,10 @@ function Get-Installer {
 }
 
 function Invoke-InstallPhase {
-    # The NetBird MSI does not require you to pre-elevate: run interactively, it
-    # requests elevation itself and Windows shows a UAC prompt. That is why you
-    # may be told it "does not need admin", and for a person double-clicking it,
-    # that is true.
-    #
-    # A silent install is a different matter, and this phase is always silent.
-    # With /qn there is no UI, so Windows cannot show that prompt and refuses:
-    # msiexec returns 1625 and logs "MSI_LUA: Installation UI level is silent, no
-    # credential elevation is possible" (measured, Windows Server 2022, v0.76.0,
-    # as a standard user). The install is per-machine regardless: Program Files,
-    # a Windows service, and a system PATH entry.
-    #
-    # So this refuses up front rather than letting msiexec fail with a code
-    # nobody recognises.
+    # The MSI does prompt for elevation on its own when run interactively, so
+    # "it needs no admin" is true for a person double-clicking it. A silent
+    # install cannot raise that prompt and msiexec fails with 1625, so this
+    # refuses up front instead. README, "Administrator rights".
     if (-not (Test-Elevated)) {
         Write-Log "This phase installs silently, and a silent install cannot raise a UAC prompt." 'ERROR'
         Write-Log "Run it as SYSTEM or from an already-elevated administrator process. Running the" 'ERROR'
@@ -669,23 +649,10 @@ function Invoke-ProvisionPhase {
     }
     Write-Log "Interactive session $session as $([Security.Principal.WindowsIdentity]::GetCurrent().Name)."
 
-    # Why this refuses to run elevated.
-    #
-    # NOT because the tray would then miss launch at login. That was the earlier
-    # rationale and it is wrong for this script: the tray is always started
-    # through a scheduled task at RunLevel Limited, and the task's RunLevel
-    # decides the child's token regardless of how elevated the registering
-    # process was. Measured: a local administrator launched that way reported
-    # elevated=False and the autostart default fired. So this script's own tray
-    # launch is safe from an elevated parent.
-    #
-    # The real reason is that an elevated provision phase is evidence the RMM is
-    # not running this step as the person at the keyboard. Everything downstream
-    # is per-user: the launch-at-login value lives in that user's HKCU, the log
-    # goes to their LOCALAPPDATA, and the tray is started as
-    # WindowsIdentity::GetCurrent(). Run under an admin account instead of the
-    # signed-in user, all of it lands on the wrong profile and the signed-in
-    # user still has no tray, which is the failure this script exists to stop.
+    # Elevated here means this is probably not running as the signed-in user,
+    # and everything below is per-user: HKCU, LOCALAPPDATA, and the identity the
+    # tray is started as. Not about the tray missing launch at login, which the
+    # RunLevel Limited launch below prevents. README, "Administrator rights".
     if (Test-Elevated) {
         if (-not $AllowElevated) {
             Write-Log "This phase is elevated, which usually means it is not running as the signed-in user." 'ERROR'
@@ -703,21 +670,10 @@ function Invoke-ProvisionPhase {
     if (-not $svc) { Stop-WithError "The $ServiceName service is absent. The install phase did not complete." }
     if ($svc.Status -ne 'Running') { Stop-WithError "The $ServiceName service is $($svc.Status), not Running." }
 
-    # Tray first, then connect. Deliberately this order.
-    #
-    # Registration can take a while and can fail: with interactive SSO it waits
-    # on a human, and against an unreachable management server it blocks until
-    # the timeout. Connecting first means that on the bad paths the user sits
-    # with no tray at all for up to ConnectTimeoutSeconds, which is exactly the
-    # symptom this script exists to prevent. It is also self-defeating, because
-    # the tray is one of the ways a user completes a sign-in.
-    #
-    # This does not produce competing login flows. Measured on Windows Server
-    # 2022, v0.76.0, daemon in NeedsLogin: the tray launched on its own opened
-    # no browser and triggered no login attempt in the daemon log, and it stayed
-    # in NeedsLogin. It waits for the user rather than starting a flow. Running
-    # 'netbird up' afterwards then logged exactly one login attempt and opened
-    # one browser, with the tray still running throughout.
+    # Tray before connect, deliberately: registration can block on a human or on
+    # an unreachable server, and the user should not be left without a tray for
+    # that long. It does not race the login, because the tray does not start a
+    # flow of its own. README, "Phase 2", has the measurement.
     Start-TrayInUserSession -InstallDir $installDir
 
     # Report the tray outcome before the connect step, so a tray failure is
