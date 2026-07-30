@@ -219,6 +219,13 @@ function Invoke-Native {
     try {
         $p = Start-Process -FilePath $FilePath -ArgumentList $Arguments -PassThru -NoNewWindow `
                            -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        # Touching Handle caches it in the .NET Process object. Without this,
+        # ExitCode comes back EMPTY once the process has exited, even though
+        # WaitForExit returned true and HasExited is $true. Measured on Windows
+        # Server 2022 / PS 5.1: 'cmd /c exit 7' reports ExitCode = '' without
+        # this line and 7 with it. The visible symptom is a successful command
+        # being reported as failed, which is worse than no report at all.
+        $null = $p.Handle
         $timedOut = $false
         if ($TimeoutSeconds -gt 0) {
             if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
@@ -236,8 +243,14 @@ function Invoke-Native {
             (Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue)
             (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
         ) -join ''
+        # Belt and braces on top of the Handle cache: if ExitCode is somehow
+        # still unreadable, say so rather than letting an empty value compare
+        # unequal to 0 and turn a success into a reported failure.
+        $code = if ($timedOut) { -1 } else { $p.ExitCode }
+        if ($null -eq $code) { $code = 'unknown' }
+
         [pscustomobject]@{
-            ExitCode = if ($timedOut) { -1 } else { $p.ExitCode }
+            ExitCode = $code
             TimedOut = $timedOut
             # -Raw returns a plain string, but bare Get-Content returns file
             # objects carrying provider note properties, which ConvertTo-Json
@@ -401,6 +414,12 @@ function Invoke-InstallPhase {
     Write-Log "Installing silently. MSI log: $msiLog"
     $proc = Start-Process -FilePath 'msiexec.exe' -Wait -PassThru -WindowStyle Hidden `
         -ArgumentList @('/i', "`"$msi`"", '/qn', '/norestart', '/l*v', "`"$msiLog`"")
+    # See the note in Invoke-Native: an uncached handle can yield an empty
+    # ExitCode. -Wait makes that far less likely, but an empty value here would
+    # fail a successful install, so it is not worth relying on the difference.
+    if ($null -eq $proc.ExitCode) {
+        Stop-WithError "msiexec exit code could not be read. Check $msiLog before retrying."
+    }
 
     Remove-Item $msi -Force -ErrorAction SilentlyContinue
 
@@ -479,7 +498,7 @@ function Connect-Peer {
         Write-Log "With interactive sign-in this usually means nobody completed it. Check the management URL is reachable." 'WARN'
     }
     elseif ($r.ExitCode -ne 0) {
-        Write-Log "'netbird up' exited $($r.ExitCode)." 'WARN'
+        Write-Log "'netbird up' reported a non-zero exit ($($r.ExitCode)). The status below is what counts." 'WARN'
     }
 
     # Report the outcome rather than assert it. A device that is not yet
