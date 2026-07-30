@@ -583,12 +583,25 @@ function Invoke-ProvisionPhase {
     if (-not $svc) { Stop-WithError "The $ServiceName service is absent. The install phase did not complete." }
     if ($svc.Status -ne 'Running') { Stop-WithError "The $ServiceName service is $($svc.Status), not Running." }
 
-    Connect-Peer -InstallDir $installDir
+    # Tray first, then connect. Deliberately this order.
+    #
+    # Registration can take a while and can fail: with interactive SSO it waits
+    # on a human, and against an unreachable management server it blocks until
+    # the timeout. Connecting first means that on the bad paths the user sits
+    # with no tray at all for up to ConnectTimeoutSeconds, which is exactly the
+    # symptom this script exists to prevent. It is also self-defeating, because
+    # the tray is one of the ways a user completes a sign-in.
+    #
+    # This does not produce competing login flows. Measured on Windows Server
+    # 2022, v0.76.0, daemon in NeedsLogin: the tray launched on its own opened
+    # no browser and triggered no login attempt in the daemon log, and it stayed
+    # in NeedsLogin. It waits for the user rather than starting a flow. Running
+    # 'netbird up' afterwards then logged exactly one login attempt and opened
+    # one browser, with the tray still running throughout.
     Start-TrayInUserSession -InstallDir $installDir
 
-    # Verify the two things that actually matter, rather than assuming the
-    # launch worked: a live tray process in this user's session, and the
-    # per-user launch-at-login value that makes this a one-time problem.
+    # Report the tray outcome before the connect step, so a tray failure is
+    # visible immediately rather than after a possible five-minute wait.
     $tray = Get-Process -Name 'netbird-ui' -ErrorAction SilentlyContinue |
             Where-Object { $_.SessionId -eq $session }
     if ($tray) {
@@ -597,6 +610,8 @@ function Invoke-ProvisionPhase {
     else {
         Write-Log "No netbird-ui process in session $session after launch. See -Phase Check." 'WARN'
     }
+
+    Connect-Peer -InstallDir $installDir
 
     $run = (Get-ItemProperty -Path $RunKeyPath -Name $RunValueName -ErrorAction SilentlyContinue).$RunValueName
     if ($run) {

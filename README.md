@@ -70,11 +70,24 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden `
 ```
 
 Refuses to run from session 0 and refuses to run elevated, because both produce
-a device that silently never gets a tray icon. Registers the peer (interactive
-SSO by default, or `-SetupKeyFile` for machines), launches the tray so that it
-lands on the user's desktop and survives this script exiting, then verifies that
-the tray is alive in the right session and that launch at login is set. Logs to
-`%LOCALAPPDATA%\NetBird\netbird-provision.log`.
+a device that silently never gets a tray icon. Then, in this order: launches the
+tray so that it lands on the user's desktop and survives this script exiting,
+confirms it is alive in the right session, registers the peer (interactive SSO by
+default, or `-SetupKeyFile` for machines), and checks that launch at login is
+set. Logs to `%LOCALAPPDATA%\NetBird\netbird-provision.log`.
+
+The tray goes first on purpose. Registration can take a while and can fail: with
+interactive SSO it waits on a person, and against an unreachable server it blocks
+until the timeout. Connecting first would leave the user with no tray at all for
+up to five minutes on exactly the paths where they most need one, and the tray is
+itself one of the ways to complete a sign-in.
+
+That does not create two competing login flows. Measured on v0.76.0 with the
+daemon in `NeedsLogin`: the tray launched on its own opens no browser and
+triggers no login attempt in the daemon log, and stays in `NeedsLogin`. It waits
+for the user rather than starting a flow. Running `netbird up` afterwards logs
+exactly one login attempt and opens one browser, with the tray running
+throughout.
 
 ### Phase 3: check, anytime
 
