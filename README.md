@@ -42,17 +42,25 @@ runs as the user rather than as SYSTEM.
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden `
   -File .\Install-NetBird.ps1 -Phase Install `
-  -ManagementUrl https://api.example.com -Version 0.75.1
+  -ManagementUrl https://api.example.com
 ```
 
-Writes the management server into managed policy, downloads the MSI for the
-machine's architecture, verifies its Authenticode signature and publisher,
-installs silently, and confirms the daemon service is running. Logs to
-`%ProgramData%\NetBird\netbird-deploy.log`, with the msiexec verbose log
+Add `-Version 0.75.1` only if the fleet has to stay on a specific release.
+
+Writes the management server into managed policy, downloads the current
+release for the machine's architecture, verifies its Authenticode signature and
+publisher, installs silently, and confirms the daemon service is running. Logs
+to `%ProgramData%\NetBird\netbird-deploy.log`, with the msiexec verbose log
 alongside it.
 
-Omit `-ManagementUrl` for NetBird Cloud. Omit `-Version` to take the current
-release, though pinning is worth the small extra effort for a fleet.
+Omit `-ManagementUrl` for NetBird Cloud. `-Version` is optional: without it you
+get the current release, which is what most deployments want. Pass one only to
+hold a fleet at a known version. Either way the installed version is written to
+the log, so a machine's log records what it actually got.
+
+If NetBird is already installed the phase does nothing, so an RMM can re-run it
+freely. It does not silently upgrade a fleet on every pass; `-Force` upgrades or
+reinstalls when you actually mean to.
 
 ### Phase 2: provision, as the signed-in user, not elevated
 
@@ -106,12 +114,12 @@ with nothing logged.
 | `-Phase` | | `Install`, `Provision`, or `Check`. Default `Install`. |
 | `-ManagementUrl` | Install, Provision | Self-hosted management server. Omit for NetBird Cloud. The port is optional: the client appends `:443` for https. |
 | `-AdminUrl` | Provision | Dashboard URL, if it differs from the management URL. |
-| `-Version` | Install | Pin a release, for example `0.75.1`. Omitted means the current release. |
+| `-Version` | Install | Hold at a specific release, for example `0.75.1`. Omitted, the default, installs the current release. |
 | `-SetupKeyFile` | Provision | Path to a file holding a setup key. Omitted means interactive SSO. |
 | `-SkipPolicy` | Install | Do not write `ManagementURL` into managed policy. |
 | `-Force` | Install | Reinstall even when the requested version is already present. |
 | `-AllowElevated` | Provision | Proceed from an elevated process, writing the launch-at-login value directly since the tray will not. |
-| `-ConnectTimeoutSeconds` | Provision | Default 120. `netbird up` against an unreachable server blocks indefinitely rather than failing, so this is bounded. |
+| `-ConnectTimeoutSeconds` | Provision | Default 300, generous enough for a human to complete an interactive sign-in. `netbird up` against an unreachable server blocks indefinitely rather than failing, so this is bounded. |
 | `-Quiet` | | File-only logging, no console output. |
 | `-LogPath` | | Override the log location. |
 
@@ -126,9 +134,9 @@ the command line rather than rejecting it, so a script carrying both is not
 broken but is also not in control of the value. The provision phase detects this
 and says so.
 
-**`AUTOSTART=0` does nothing on v0.75.x.** The MSI property existed through
-v0.74.7 and wrote a machine-wide `Run` entry. On v0.75.x there is no such
-property; passing it is accepted silently with exit code 0 and the string does
+**`AUTOSTART=0` does nothing from v0.75.0 on.** The MSI property existed
+through v0.74.7 and wrote a machine-wide `Run` entry. From v0.75.0 there is no
+such property; passing it is accepted silently with exit code 0 and the string does
 not appear in the verbose MSI log at all. Suppress the tray at login with the
 `DisableAutostart` managed policy value instead, which is enforced on every UI
 launch rather than once at install time.
@@ -161,7 +169,12 @@ to run a 32-bit PowerShell host on a 64-bit machine.
 
 ## Behavior claims
 
-Every claim above about v0.75.x behavior was measured on Windows Server 2022
-with client v0.75.1, against v0.74.7 as a version control, rather than read off
-the source. The details are unremarkable and the conclusions are not, which is
-why they are stated as flatly as they are.
+Every claim above was measured on Windows Server 2022 with client v0.75.1,
+against v0.74.7 as a version control, rather than read off the source. The
+details are unremarkable and the conclusions are not, which is why they are
+stated as flatly as they are.
+
+The claims still hold on v0.76.0: `client/ui/autostart_default.go`,
+`client/netbird.wxs` and `client/installer.nsis` are byte-identical between
+v0.75.1 and v0.76.0, so nothing the autostart and installer behavior rests on
+changed. The script itself was run end to end on v0.76.0.

@@ -68,9 +68,10 @@ param(
     # Dashboard URL, if it differs from the management URL. Provision phase only.
     [string]$AdminUrl,
 
-    # Pin a release, for example '0.75.1'. Strongly recommended for fleet
-    # rollouts: reproducible, and upgrades become a deliberate act. Omitted
-    # means the pkgs.netbird.io "latest" redirect, which moves under you.
+    # Omitted, the default, installs the current release. Pass a version, for
+    # example '0.75.1', only when a fleet has to be held at a known release and
+    # upgrades made a deliberate act. Either way the installed version is
+    # logged, so a machine's log always records what it actually got.
     [string]$Version,
 
     # Path to a file containing only a setup key. Provision phase. Omitted
@@ -335,10 +336,13 @@ function Get-Installer {
         Write-Log "Downloading pinned MSI $tag ($arch)"
     }
     else {
+        # The default, and the right one for most deployments: take the current
+        # release. The exact version that lands is logged after the install, so
+        # the log still records what a given machine actually got.
         # The pkgs.netbird.io redirect names the x64 flavour 'x64', not 'amd64'.
         $slug = if ($arch -eq 'arm64') { 'arm64' } else { 'x64' }
         $url  = "https://pkgs.netbird.io/windows/msi/$slug"
-        Write-Log "Downloading latest MSI ($arch). Pin a release with -Version for reproducible rollouts." 'WARN'
+        Write-Log "Downloading the current release ($arch)."
     }
 
     try {
@@ -384,7 +388,10 @@ function Invoke-InstallPhase {
     if ($existing -and -not $Force) {
         $wanted = $Version -replace '^v', ''
         if (-not $wanted -or $existing.DisplayVersion -like "$wanted*") {
-            Write-Log "NetBird $($existing.DisplayVersion) already installed. Nothing to do."
+            # Deliberately does not upgrade on every re-run. An RMM re-runs this
+            # step routinely, and silently churning a fleet's client version on
+            # each pass is not something a deployment script should decide.
+            Write-Log "NetBird $($existing.DisplayVersion) already installed. Nothing to do (-Force to reinstall or upgrade)."
             if ($ManagementUrl -and -not $SkipPolicy) { Set-ManagementPolicy -Url $ManagementUrl }
             return 0
         }
